@@ -1,0 +1,5 @@
+# Match CANN 9.1.0 / TorchNPU release 26.1.0 (package 2.7.1.post8).
+torch==2.7.1
+torchaudio==2.7.1
+torch-npu==2.7.1.post8
+numpy<2
