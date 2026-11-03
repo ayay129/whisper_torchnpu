@@ -138,7 +138,7 @@ class TSBBackend:
         joined = np.concatenate(waveforms)
         with self.runtime.lock:
             turns, vectors = self.runtime.speakers(joined, embeddings=True)
-            if not vectors or sum(end - start for start, end, _ in turns) < 5:
+            if (not vectors and mode == 'vponly') or (vectors and sum(end - start for start, end, _ in turns) < 5):
                 raise ValueError('Effective audio duration is too short')
             speaker_ids = {name: i for i, name in enumerate(vectors)}
             speakers = [{'speaker_id': speaker_ids[name], 'vpstr': encode_vector(vector)} for name, vector in vectors.items()]
@@ -149,9 +149,7 @@ class TSBBackend:
                     for segment in result['segments']:
                         lookup = {**segment, 'start': segment['start'] + start, 'end': segment['end'] + start}
                         speaker = speaker_for_segment(lookup, turns)
-                        if speaker not in speaker_ids:
-                            raise ValueError('Transcript segment has no matching speaker')
                         segments.append({**segment, 'start': round(offset + segment['start'], 3),
-                                         'end': round(offset + segment['end'], 3), 'speaker_id': speaker_ids[speaker]})
+                                         'end': round(offset + segment['end'], 3), 'speaker_id': speaker_ids.get(speaker)})
         return {'rtf': (time.perf_counter() - started) / cursor if cursor else 0,
                 'segments': segments, 'speaker_count': len(speakers), 'speakers': speakers}

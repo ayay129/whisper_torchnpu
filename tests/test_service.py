@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from app import create_app
 from audio import decode_media, decode_pcm
 from runtime import SAMPLE_RATE, WhisperRuntime, speech_chunks, use_cpu_fbank_on_npu
+from tsb_api import TSBBackend
 
 
 class FakeRuntime:
@@ -121,6 +122,26 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.text)
         self.assertEqual(result.json()['segments'][0], {'text': 'hello', 'start': 2.25, 'end': 3.25})
         self.assertEqual(self.client.post('/transcribe', data={}).status_code, 400)
+
+    def test_missing_speaker_returns_null(self):
+        with patch.object(self.runtime, 'speakers', return_value=([], {})):
+            with patch('app.decode_media', return_value=np.zeros(SAMPLE_RATE, dtype=np.float32)):
+                response = self.client.post('/transcribe', files={'file': ('test.wav', b'wave', 'audio/wav')},
+                                            data={'diarize': 'true', 'speaker_embeddings': 'true'})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertIsNone(response.json()['segments'][0]['speaker'])
+            path = Path(self.temp.name) / 'test.pcm'
+            path.write_bytes(b'\0\0' * (6 * SAMPLE_RATE))
+            result = TSBBackend(self.runtime)([(path, SAMPLE_RATE, 0)], 'combo')
+            self.assertIsNone(result['segments'][0]['speaker_id'])
+            self.assertEqual(result['speaker_count'], 0)
+            with self.assertRaisesRegex(ValueError, 'too short'):
+                TSBBackend(self.runtime)([(path, SAMPLE_RATE, 0)], 'vponly')
+        with patch.object(self.runtime, 'speakers', return_value=(
+                [(1.5, 6.5, 'SPEAKER_00')], {'SPEAKER_00': np.array([1, 2], dtype='<f4')})):
+            result = TSBBackend(self.runtime)([(path, SAMPLE_RATE, 0)], 'combo')
+            self.assertIsNone(result['segments'][0]['speaker_id'])
+            self.assertEqual(result['speaker_count'], 1)
 
     def test_tsb_both_sides_and_repeated_result(self):
         for mode in ('combo', 'vponly'):

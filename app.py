@@ -58,7 +58,7 @@ def create_app(runtime, data_dir, workers=6):
                             result['speaker_embeddings'] = {name: encode_vector(vector) for name, vector in vectors.items()}
                         for segment in result['segments']:
                             speaker = speaker_for_segment(segment, turns)
-                            if speaker_embeddings and speaker is not None:
+                            if speaker_embeddings:
                                 segment['speaker'] = speaker
                             segment['text'] = f"{speaker or ''} || {segment['text'].strip()}"
                 return result

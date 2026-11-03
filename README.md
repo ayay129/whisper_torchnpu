@@ -27,6 +27,8 @@ Silero 的 `hubconf.py` 还会导入同仓库的 `src/silero_vad/` 代码，所�
 
 ## 环境和运行
 
+云平台已提供 SSH 容器、仅挂载驱动且没有 Docker/CANN 时，参考 [云平台容器部署验证](DEPLOY_CLOUD.md) 直接安装；该指引对应当前验证机 910B2 / 驱动 25.2.1 / aarch64。
+
 准备 ffmpeg，以及适配目标设备的 CANN、PyTorch、torchaudio 和 torch-npu。TorchNPU 通过 CANN 调用昇腾算子，依然需要 CANN。`constraints.txt` 固定当前 Docker 构建基线：PyTorch/torchaudio 2.7.1、torch-npu 2.7.1.post8，配套 CANN 9.1.0。其他 CANN 版本需要重新核对配套关系。不要把本项目与昇腾 950 项目的依赖版本直接混用。安装完对应的 torch/torchaudio/torch-npu 后：
 
 ```bash
