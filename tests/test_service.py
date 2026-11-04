@@ -161,6 +161,21 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('workerid=0 cdrid=12345 dir=1 seqno=2 continue=1', captured.output[0])
 
+    def test_tsb_status_endpoint(self):
+        worker = self.client.get('/tsb/sessionapply').json()['workerid']
+        metadata = {**sample(0, 1793776767146000), 'continue': 1}
+        response = self.client.post('/tsb/transcribe', data={'workerid': worker,
+            'sample': json.dumps(metadata), 'label': '{"time":"today","start":0}'},
+            files={'sgmfile': ('test.pcm', b'\0\0' * (6 * SAMPLE_RATE))})
+        self.assertEqual(response.status_code, 200)
+        status = self.client.get('/tsb/status', params={'workerid': worker, 'cdrid': '1793776767146000'})
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.json(), {'code': 200, 'workerid': worker, 'cdrid': 1793776767146000,
+            'l': {'status': 'receiving', 'received_fragments': 1, 'next_seqno': 1},
+            'r': {'status': 'not_received', 'received_fragments': 0}})
+        self.assertEqual(self.client.get('/tsb/status', params={'workerid': worker, 'cdrid': 'abc'}).status_code, 400)
+        self.assertEqual(self.client.get('/tsb/status', params={'workerid': worker, 'cdrid': str(2 ** 63)}).status_code, 400)
+
     def test_tsb_both_sides_and_repeated_result(self):
         for mode in ('combo', 'vponly'):
             with self.subTest(mode=mode):

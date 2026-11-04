@@ -21,27 +21,33 @@ class TSBError(Exception):
 
 
 class TSBService:
-    def __init__(self, backend, directory, workers=6, capacity=1_152_000_000, retention=86400, wait_seconds=30):
+    def __init__(self, backend, directory, workers=6, capacity=1_152_000_000, retention=86400, wait_seconds=30, worker_backends=None):
         self.backend = backend
+        if worker_backends is not None and len(worker_backends) != workers:
+            raise ValueError('worker_backends must match workers')
+        self.worker_backends = worker_backends
         self.root = Path(directory).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.audio_dir = self.root / 'audio'
         self.audio_dir.mkdir(exist_ok=True)
         self.db = sqlite3.connect(self.root / 'results.sqlite3', check_same_thread=False)
         self.db.execute('CREATE TABLE IF NOT EXISTS results (worker INTEGER, cdrid INTEGER, direction INTEGER, result TEXT, expires REAL, PRIMARY KEY(worker,cdrid,direction))')
+        self.db.execute('CREATE TABLE IF NOT EXISTS result_fragments (worker INTEGER, cdrid INTEGER, direction INTEGER, fragments INTEGER, expires REAL, PRIMARY KEY(worker,cdrid,direction))')
         self.db.commit()
         self.capacity, self.retention, self.wait_seconds = capacity, retention, wait_seconds
         self.condition = threading.Condition(threading.RLock())
         self.priority_waiters = 0
         self.workers = [self._empty(0) for _ in range(workers)]
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='tsb-inference')
+        self.executors = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f'tsb-inference-{i}') for i in range(workers)]
 
     @staticmethod
     def _empty(generation):
         return {'generation': generation, 'applied': False, 'cdrid': None, 'sides': {}, 'error': None, 'bytes': 0, 'mode': None}
 
     def _cleanup_results(self):
-        self.db.execute('DELETE FROM results WHERE expires <= ?', (time.time(),))
+        now = time.time()
+        self.db.execute('DELETE FROM results WHERE expires <= ?', (now,))
+        self.db.execute('DELETE FROM result_fragments WHERE expires <= ?', (now,))
         self.db.commit()
 
     def apply(self, priority=0):
@@ -84,7 +90,10 @@ class TSBService:
             logger.info('TSB worker_reset workerid=%s cdrid=%s generation=%s', workerid, old['cdrid'], old['generation'])
             self.workers[workerid] = self._empty(old['generation'] + 1)
             for side in old['sides'].values():
-                shutil.rmtree(side['directory'], ignore_errors=True)
+                if side['status'] == 'processing':
+                    side['cleanup_on_completion'] = True
+                else:
+                    shutil.rmtree(side['directory'], ignore_errors=True)
             self.condition.notify_all()
 
     def submit(self, workerid, sample, label, payload, mode):
@@ -114,7 +123,7 @@ class TSBService:
             if worker['bytes'] + len(payload) > self.capacity:
                 raise TSBError('Resources is busy')
             if side is None:
-                side = {'directory': tempfile.mkdtemp(prefix='tsb-', dir=self.audio_dir), 'parts': [], 'bytes': 0, 'finished': False, 'done': False}
+                side = {'directory': tempfile.mkdtemp(prefix='tsb-', dir=self.audio_dir), 'parts': [], 'bytes': 0, 'finished': False, 'done': False, 'status': 'receiving'}
                 worker['sides'][direction] = side
             path = Path(side['directory']) / str(sample['seqno'])
             path.write_bytes(payload)
@@ -126,14 +135,16 @@ class TSBService:
                         workerid, cdrid, worker['generation'], direction, sample['seqno'], sample['continue'], len(payload), mode)
             if sample['continue'] == 0:
                 side['finished'] = True
+                side['status'] = 'queued'
                 queued_at = time.monotonic()
-                self.executor.submit(self._run, workerid, worker['generation'], cdrid, direction, list(side['parts']), mode, queued_at)
+                self.executors[workerid].submit(self._run, workerid, worker['generation'], cdrid, direction, list(side['parts']), mode, queued_at)
                 logger.info('TSB queued workerid=%s cdrid=%s generation=%s dir=%s fragments=%s size=%s',
                             workerid, cdrid, worker['generation'], direction, len(side['parts']), side['bytes'])
             block = len(worker['sides']) == 2 and all(s['finished'] for s in worker['sides'].values()) and worker['bytes'] > self.capacity / 2
             return block
 
     def _run(self, workerid, generation, cdrid, direction, parts, mode, queued_at):
+        side = None
         try:
             with self.condition:
                 worker = self.workers[workerid]
@@ -141,9 +152,12 @@ class TSBService:
                     logger.info('TSB task_discarded workerid=%s cdrid=%s generation=%s dir=%s stage=queued', workerid, cdrid, generation, direction)
                     return
                 started = time.monotonic()
+                side = worker['sides'][direction]
+                side['status'] = 'processing'
                 logger.info('TSB processing_started workerid=%s cdrid=%s generation=%s dir=%s queue_wait_ms=%.0f',
                             workerid, cdrid, generation, direction, (started - queued_at) * 1000)
-            result = self.backend(parts, mode)
+            backend = self.worker_backends[workerid] if self.worker_backends is not None else self.backend
+            result = backend(parts, mode)
         except Exception as exc:
             logger.exception('TSB inference failed: workerid=%s cdrid=%s dir=%s', workerid, cdrid, direction)
             msg = str(exc)
@@ -157,14 +171,22 @@ class TSBService:
                 worker = self.workers[workerid]
                 if worker['generation'] == generation and worker['applied']:
                     worker['error'] = msg
+                if side and side.get('cleanup_on_completion'):
+                    shutil.rmtree(side['directory'], ignore_errors=True)
             return
         with self.condition:
             worker = self.workers[workerid]
             if worker['generation'] != generation or not worker['applied'] or worker['error']:
                 logger.info('TSB task_discarded workerid=%s cdrid=%s generation=%s dir=%s stage=completed', workerid, cdrid, generation, direction)
+                if side.get('cleanup_on_completion'):
+                    shutil.rmtree(side['directory'], ignore_errors=True)
                 return
             try:
-                self.db.execute('INSERT OR REPLACE INTO results VALUES (?,?,?,?,?)', (workerid, cdrid, direction, json.dumps(result, ensure_ascii=False), time.time() + self.retention))
+                expires = time.time() + self.retention
+                self.db.execute('INSERT OR REPLACE INTO results (worker,cdrid,direction,result,expires) VALUES (?,?,?,?,?)',
+                                (workerid, cdrid, direction, json.dumps(result, ensure_ascii=False), expires))
+                self.db.execute('INSERT OR REPLACE INTO result_fragments VALUES (?,?,?,?,?)',
+                                (workerid, cdrid, direction, len(parts), expires))
                 self.db.commit()
             except Exception:
                 logger.exception('Unable to save TSB result: workerid=%s cdrid=%s generation=%s dir=%s', workerid, cdrid, generation, direction)
@@ -181,6 +203,35 @@ class TSBService:
                 logger.info('TSB worker_released workerid=%s cdrid=%s generation=%s', workerid, cdrid, generation)
                 self.workers[workerid] = self._empty(generation + 1)
                 self.condition.notify_all()
+
+    def status(self, workerid, cdrid):
+        with self.condition:
+            if not isinstance(workerid, int) or not 0 <= workerid < len(self.workers):
+                raise TSBError('workerid is required')
+            worker = self.workers[workerid]
+            active = worker['applied'] and worker['cdrid'] == cdrid
+            rows = self.db.execute('SELECT r.direction,f.fragments FROM results r LEFT JOIN result_fragments f '
+                                   'ON f.worker=r.worker AND f.cdrid=r.cdrid AND f.direction=r.direction AND f.expires=r.expires '
+                                   'WHERE r.worker=? AND r.cdrid=? AND r.expires>?',
+                                   (workerid, cdrid, time.time())).fetchall()
+            saved = dict(rows)
+            result = {'code': 200, 'workerid': str(workerid), 'cdrid': cdrid}
+            for direction, name in ((0, 'l'), (1, 'r')):
+                side = worker['sides'].get(direction) if active else None
+                if direction in saved:
+                    state = {'status': 'completed', 'received_fragments': saved[direction]}
+                elif active and worker['error']:
+                    state = {'status': 'failed', 'received_fragments': len(side['parts']) if side else 0, 'error': worker['error']}
+                elif side and not side['done']:
+                    state = {'status': side['status'], 'received_fragments': len(side['parts'])}
+                    if side['status'] == 'receiving':
+                        state['next_seqno'] = len(side['parts'])
+                elif active and side is None:
+                    state = {'status': 'not_received', 'received_fragments': 0}
+                else:
+                    state = {'status': 'unknown', 'received_fragments': None}
+                result[name] = state
+            return result
 
     def get(self, workerid, cdrids):
         with self.condition:
@@ -204,5 +255,6 @@ class TSBService:
             return {'code': 200, 'msg': 'Success', 'completed': bool(data), **({'data': data} if data else {})}
 
     def close(self):
-        self.executor.shutdown(wait=True)
+        for executor in self.executors:
+            executor.shutdown(wait=True)
         self.db.close()

@@ -113,6 +113,8 @@ PY
 
 模型布局见 [README.md](README.md)。Whisper 使用 Hugging Face 原始权重，Silero 和 pyannote 使用完整本地模型目录。测试音频先选一份含清晰语音的短 WAV。
 
+`--workers` 同时决定会话数和常驻推理进程数；每个进程单独加载模型到同一张 NPU。下面的 `--workers 6` 会加载六套模型，建议先从 `--workers 2` 验证显存、稳定性和吞吐。
+
 ```bash
 python app.py --models-dir ./models --data-dir ./private-tsb-data \
   --device-id 0 --workers 6 --host 0.0.0.0 --port 8000

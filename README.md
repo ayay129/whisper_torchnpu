@@ -31,6 +31,8 @@ Silero 的 `hubconf.py` 还会导入同仓库的 `src/silero_vad/` 代码，所�
 
 准备 ffmpeg，以及适配目标设备的 CANN、PyTorch、torchaudio 和 torch-npu。TorchNPU 通过 CANN 调用昇腾算子，依然需要 CANN。`constraints.txt` 固定当前 Docker 构建基线：PyTorch/torchaudio 2.7.1、torch-npu 2.7.1.post8，配套 CANN 9.1.0。其他 CANN 版本需要重新核对配套关系。不要把本项目与昇腾 950 项目的依赖版本直接混用。安装完对应的 torch/torchaudio/torch-npu 后：
 
+`--workers N` 会创建 N 个 TSB 会话名额和 N 个常驻推理进程，每个进程在指定 NPU 上独立加载一套模型。默认值为 6，启动和显存开销会随进程数增加；建议先用 `--workers 2` 在目标机器验证显存和吞吐。所有进程初始化完成后服务才开始监听端口。普通 `/transcribe` 请求使用 0 号推理进程，与 TSB worker 0 的任务排队执行，不额外加载模型。
+
 ```bash
 python -m pip install -c constraints.txt -r requirements.txt \
   -i https://mirrors.huaweicloud.com/repository/pypi/simple
@@ -117,7 +119,7 @@ docker logs -f whisperx-imonitor
 
 - `GET /health`：健康检查。
 - `POST /transcribe`：`file` 上传普通音视频，支持 `diarize`、`min_speakers`、`max_speakers`、`speaker_embeddings`；也兼容原 CDR 的 `sample`、`label`、`sgmfile` PCM 表单。两种表单不要混用。
-- `GET /tsb/alive`、`/tsb/sessionapply`、`/tsb/workerstart`、`/tsb/tsbrestart`。
+- `GET /tsb/alive`、`/tsb/sessionapply`、`/tsb/status`、`/tsb/workerstart`、`/tsb/tsbrestart`。
 - `POST /tsb/transcribe`、`/tsb/getresult`。
 
 上传 WAV/MP4 示例：
@@ -131,6 +133,12 @@ curl -X POST http://127.0.0.1:8000/transcribe \
 
 TSB 流程：先调用 `/tsb/sessionapply`，使用返回的 `workerid`；依次以 `dir=0` 和 `dir=1` 上传同一个 `cdrid` 的 PCM，每路最后一片 `continue=0`；随后使用 `workerid` 和形如 `[12345]` 的 `cdrid` 表单轮询 `/tsb/getresult`。`combo` 输出转录和声纹，`vponly` 仅输出声纹。单个 worker 只绑定一个 `cdrid`。`completed=true` 代表至少一路有结果，需分别检查 `l` 和 `r`。
 
+可通过 `GET /tsb/status?workerid=2&cdrid=1793776767146000` 查询同一会话左右声道的状态。每路返回 `status` 和 `received_fragments`；`receiving` 时额外返回 `next_seqno`，表示下一片的序号，不代表剩余数量。状态包括 `not_received`、`receiving`、`queued`、`processing`、`completed`、`failed` 和 `unknown`；`failed` 会附带简短的 `error`。`processing` 表示处理线程已取出任务，可能仍在等待推理进程或模型锁。成功结果和新写入的分片数量保留 24 小时；旧结果的分片数量可能为 `null`。服务重启或 worker 重置后未完成的声道无法恢复，状态为 `unknown`，需要重传；查询状态不会重置会话。
+
+```bash
+curl -sS 'http://127.0.0.1:8000/tsb/status?workerid=2&cdrid=1793776767146000'
+```
+
 原 CDR 的批量测试脚本也可直接使用：
 
 ```bash
@@ -138,11 +146,11 @@ bash wav_to_pcm.sh /path/to/wav_directory
 bash transcribe_pcm.sh /path/to/pcm_directory http://127.0.0.1:8000
 ```
 
-TSB 每侧完成后结果保存 24 小时；在保留期内支持重复查询，包括 worker 释放后。SQLite 与 PCM 缓存位于 `--data-dir`，请挂载持久卷并限制目录权限。一个 worker 对应一个会话；6 是逻辑名额，底层推理串行。断开连接的未完成会话需要调用 workerstart 释放。当前重启接口只重置会话状态，不重建共享 NPU 模型；服务异常退出后未完成会话需要重传，遗留的临时音频需停服后清理。
+TSB 每侧完成后结果保存 24 小时；在保留期内支持重复查询，包括 worker 释放后。SQLite 与 PCM 缓存位于 `--data-dir`，请挂载持久卷并限制目录权限。每个 worker 绑定一个常驻推理进程；不同 worker 可以并行，同一 worker 的任务依次处理。断开连接的未完成会话需要调用 workerstart 释放。重启接口只重置会话状态，不重建推理进程或中断正在执行的任务；进程异常退出后需要重启整个服务。服务退出后未完成会话需要重传，遗留的临时音频需停服后清理。
 
 TSB 返回的 `rtf` 是音频时长除以处理耗时，例如 `2.0` 表示每秒处理约 2 秒音频，越大越快。此前保存的历史结果保留原有数值，不会自动换算。
 
-服务日志记录 worker 申请和释放、分片接收、任务入队、开始处理、结果保存和查询；用 `grep -F 'cdrid=12345' api.log` 追踪单个会话。`processing_started` 表示任务已从队列取出，不代表已取得模型锁或 NPU 已开始计算。日志不包含音频、转录文本或声纹向量；高频查询会产生对应的查询日志。
+服务日志记录 worker 申请和释放、分片接收、任务入队、开始处理、结果保存和查询；用 `grep -F 'cdrid=12345' api.log` 追踪单个会话。`processing_started` 表示任务已从 worker 队列取出，不代表推理进程已空闲或 NPU 已开始计算。日志不包含音频、转录文本或声纹向量；高频查询会产生对应的查询日志。
 
 ## 测试与限制
 

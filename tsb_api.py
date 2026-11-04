@@ -98,6 +98,19 @@ def create_app(service, cdr_app=None):
     def apply(priority: int = 0):
         return {'code': 200, 'msg': 'Success', 'workerid': str(service.apply(priority))}
 
+    @app.get('/tsb/status')
+    def status(request: Request, workerid: str = '', cdrid: str = ''):
+        try:
+            cdrid_value = int(cdrid)
+        except (TypeError, ValueError):
+            raise TSBError('cdrid must be a 64-bit integer')
+        if not -(2 ** 63) <= cdrid_value < 2 ** 63:
+            raise TSBError('cdrid must be a 64-bit integer')
+        request.state.trace = {'cdrid': cdrid_value}
+        worker = worker_number(workerid)
+        request.state.trace['workerid'] = worker
+        return service.status(worker, cdrid_value)
+
     @app.post('/tsb/transcribe')
     async def transcribe(request: Request, workerid: str = Form(''), sample: str = Form(''), label: str = Form(''), sgmfile: UploadFile = File(...), mode: str = Form('combo')):
         request.state.trace = {}
