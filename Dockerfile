@@ -12,14 +12,14 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt constraints.txt ./
-# CPU wheels use PyTorch's index; torch-npu supplies the NPU backend.
+# CPU wheels use the Alibaba mirror; torch-npu supplies the NPU backend.
 RUN case "$(uname -m)" in \
       x86_64) python -m pip install --no-cache-dir 'numpy<2' \
         'torch==2.7.1+cpu' 'torchaudio==2.7.1+cpu' \
-        --extra-index-url https://download.pytorch.org/whl/cpu ;; \
+        --find-links https://mirrors.aliyun.com/pytorch-wheels/cpu/ ;; \
       aarch64) python -m pip install --no-cache-dir 'numpy<2' \
         'torch==2.7.1+cpu' 'torchaudio==2.7.1' \
-        --extra-index-url https://download.pytorch.org/whl/cpu ;; \
+        --find-links https://mirrors.aliyun.com/pytorch-wheels/cpu/ ;; \
       *) echo 'Unsupported CPU architecture' >&2; exit 1 ;; \
     esac && \
     python -m pip install --no-cache-dir --no-deps 'torch-npu==2.7.1.post8' && \

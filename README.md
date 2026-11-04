@@ -84,7 +84,7 @@ docker build \
   -t whisperx-imonitor .
 ```
 
-通用依赖和 torch-npu 使用华为 PyPI 源。两种 CPU 架构的 torch 都使用 PyTorch 官方 `2.7.1+cpu` wheel，因此额外使用 `https://download.pytorch.org/whl/cpu`，避免安装 CUDA 版 PyTorch；torchaudio 的 x86_64 wheel 是 `2.7.1+cpu`，ARM64 wheel 是 `2.7.1`。CPU wheel 配合 torch-npu，Whisper 和声纹模型仍在 NPU 运行。不要仅替换基础镜像为其他 CANN 版本，而继续沿用这组固定的 PyTorch/TorchNPU 版本。
+通用依赖和 torch-npu 使用华为 PyPI 源。两种 CPU 架构的 torch 都使用 `2.7.1+cpu` wheel，Docker 构建通过阿里云 PyTorch wheel 镜像 `https://mirrors.aliyun.com/pytorch-wheels/cpu/` 获取，避免安装 CUDA 版 PyTorch；torchaudio 的 x86_64 wheel 是 `2.7.1+cpu`，ARM64 wheel 是 `2.7.1`。CPU wheel 配合 torch-npu，Whisper 和声纹模型仍在 NPU 运行。不要仅替换基础镜像为其他 CANN 版本，而继续沿用这组固定的 PyTorch/TorchNPU 版本。
 
 `entrypoint.sh` 会在启动应用前加载容器内的 `/usr/local/Ascend/ascend-toolkit/set_env.sh`，再执行 CMD。构建步骤会检查依赖、导入版本和 ffmpeg；仅在构建时的导入检查设置 `TORCH_DEVICE_BACKEND_AUTOLOAD=0`，避免无驱动挂载时自动加载 TorchNPU。运行应用时正常启用 NPU。
 
