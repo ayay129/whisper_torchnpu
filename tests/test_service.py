@@ -38,6 +38,14 @@ def sample(direction, cdrid=42):
 
 
 class RuntimeTest(unittest.TestCase):
+    def test_tsb_rtf_is_audio_duration_divided_by_processing_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'audio.pcm'
+            path.write_bytes(b'\0\0' * (6 * SAMPLE_RATE))
+            with patch('time.perf_counter', side_effect=[100.0, 102.0]):
+                result = TSBBackend(FakeRuntime())([(path, SAMPLE_RATE, 0)], 'vponly')
+            self.assertEqual(result['rtf'], 3.0)
+
     @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg is required')
     def test_actual_media_decoding_and_8khz_pcm(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -142,6 +150,16 @@ class ServiceTest(unittest.TestCase):
             result = TSBBackend(self.runtime)([(path, SAMPLE_RATE, 0)], 'combo')
             self.assertIsNone(result['segments'][0]['speaker_id'])
             self.assertEqual(result['speaker_count'], 1)
+
+    def test_rejected_fragment_logs_call_identifiers(self):
+        worker = self.client.get('/tsb/sessionapply').json()['workerid']
+        metadata = {**sample(1, 12345), 'seqno': 2, 'continue': 1}
+        with self.assertLogs('tsb_api', level='WARNING') as captured:
+            response = self.client.post('/tsb/transcribe', data={'workerid': worker,
+                'sample': json.dumps(metadata), 'label': '{"time":"today","start":0}'},
+                files={'sgmfile': ('test.pcm', b'\0\0' * (6 * SAMPLE_RATE))})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('workerid=0 cdrid=12345 dir=1 seqno=2 continue=1', captured.output[0])
 
     def test_tsb_both_sides_and_repeated_result(self):
         for mode in ('combo', 'vponly'):

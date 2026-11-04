@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 
 import numpy as np
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from tsb_core import TSBError, TSBService
+
+logger = logging.getLogger(__name__)
 
 
 def parse_object(name, raw):
@@ -61,13 +64,19 @@ def create_app(service, cdr_app=None):
     app = FastAPI(title='MindIE WhisperX TSB')
 
     @app.exception_handler(TSBError)
-    async def tsb_error(_request, exc):
+    async def tsb_error(request, exc):
+        trace = getattr(request.state, 'trace', {})
+        for cdrid in trace.get('cdrids', [trace.get('cdrid')]):
+            logger.warning('TSB request_rejected path=%s workerid=%s cdrid=%s dir=%s seqno=%s continue=%s status=%s reason=%s',
+                           request.url.path, trace.get('workerid'), cdrid, trace.get('dir'), trace.get('seqno'),
+                           trace.get('continue'), exc.code, exc.message)
         return JSONResponse(status_code=exc.code, content={'code': exc.code, 'msg': exc.message})
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
         if not request.url.path.startswith('/tsb/'):
             return await request_validation_exception_handler(request, exc)
+        logger.warning('TSB request_rejected path=%s status=400 reason=Invalid request', request.url.path)
         return JSONResponse(status_code=400, content={'code': 400, 'msg': 'Invalid request'})
 
     @app.get('/tsb/alive')
@@ -90,26 +99,43 @@ def create_app(service, cdr_app=None):
         return {'code': 200, 'msg': 'Success', 'workerid': str(service.apply(priority))}
 
     @app.post('/tsb/transcribe')
-    async def transcribe(workerid: str = Form(''), sample: str = Form(''), label: str = Form(''), sgmfile: UploadFile = File(...), mode: str = Form('combo')):
+    async def transcribe(request: Request, workerid: str = Form(''), sample: str = Form(''), label: str = Form(''), sgmfile: UploadFile = File(...), mode: str = Form('combo')):
+        request.state.trace = {}
+        try:
+            request.state.trace['workerid'] = worker_number(workerid)
+        except TSBError:
+            pass
+        try:
+            candidate = json.loads(sample)
+            request.state.trace.update({key: candidate[key] for key in ('cdrid', 'dir', 'seqno', 'continue', 'size')
+                                        if isinstance(candidate, dict) and type(candidate.get(key)) is int})
+        except (ValueError, TypeError):
+            pass
         meta, label_meta = parse_input(sample, label)
+        request.state.trace = {key: meta[key] for key in ('cdrid', 'dir', 'seqno', 'continue', 'size')}
+        worker = worker_number(workerid)
+        request.state.trace['workerid'] = worker
         if meta['size'] > service.capacity:
             raise TSBError('Resources is busy')
         try:
             payload = await sgmfile.read(meta['size'] + 1)
         finally:
             await sgmfile.close()
-        block = await run_in_threadpool(service.submit, worker_number(workerid), meta, label_meta, payload, mode)
+        block = await run_in_threadpool(service.submit, worker, meta, label_meta, payload, mode)
         return {'code': 200, 'msg': 'Success', 'block': block}
 
     @app.post('/tsb/getresult')
-    def getresult(workerid: str = Form(''), cdrid: str = Form('')):
+    def getresult(request: Request, workerid: str = Form(''), cdrid: str = Form('')):
         try:
             ids = json.loads(cdrid)
         except ValueError:
             raise TSBError('cdrid must be a JSON array')
         if not isinstance(ids, list) or not ids or any(type(i) is not int or not -(2 ** 63) <= i < 2 ** 63 for i in ids):
             raise TSBError('cdrid must be a JSON array of integers')
-        return service.get(worker_number(workerid), ids)
+        request.state.trace = {'cdrids': ids}
+        worker = worker_number(workerid)
+        request.state.trace['workerid'] = worker
+        return service.get(worker, ids)
 
     if cdr_app is not None:
         app.include_router(cdr_app.router)
@@ -151,5 +177,6 @@ class TSBBackend:
                         speaker = speaker_for_segment(lookup, turns)
                         segments.append({**segment, 'start': round(offset + segment['start'], 3),
                                          'end': round(offset + segment['end'], 3), 'speaker_id': speaker_ids.get(speaker)})
-        return {'rtf': (time.perf_counter() - started) / cursor if cursor else 0,
+        elapsed = time.perf_counter() - started
+        return {'rtf': cursor / elapsed if elapsed > 0 else 0,
                 'segments': segments, 'speaker_count': len(speakers), 'speakers': speakers}

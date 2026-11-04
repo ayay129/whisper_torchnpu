@@ -55,6 +55,7 @@ class TSBService:
                         for i, worker in enumerate(self.workers):
                             if not worker['applied']:
                                 worker['applied'] = True
+                                logger.info('TSB worker_applied workerid=%s generation=%s priority=%s', i, worker['generation'], priority)
                                 return i
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -80,6 +81,7 @@ class TSBService:
             if not isinstance(workerid, int) or not 0 <= workerid < len(self.workers):
                 raise TSBError('workerid is required')
             old = self.workers[workerid]
+            logger.info('TSB worker_reset workerid=%s cdrid=%s generation=%s', workerid, old['cdrid'], old['generation'])
             self.workers[workerid] = self._empty(old['generation'] + 1)
             for side in old['sides'].values():
                 shutil.rmtree(side['directory'], ignore_errors=True)
@@ -112,25 +114,35 @@ class TSBService:
             if worker['bytes'] + len(payload) > self.capacity:
                 raise TSBError('Resources is busy')
             if side is None:
-                side = {'directory': tempfile.mkdtemp(prefix='tsb-', dir=self.audio_dir), 'parts': [], 'finished': False, 'done': False}
+                side = {'directory': tempfile.mkdtemp(prefix='tsb-', dir=self.audio_dir), 'parts': [], 'bytes': 0, 'finished': False, 'done': False}
                 worker['sides'][direction] = side
             path = Path(side['directory']) / str(sample['seqno'])
             path.write_bytes(payload)
             side['parts'].append((str(path), sample['rate'], sample.get('timestamp', label['start'])))
+            side['bytes'] += len(payload)
             worker['cdrid'], worker['mode'] = cdrid, mode
             worker['bytes'] += len(payload)
+            logger.info('TSB fragment_received workerid=%s cdrid=%s generation=%s dir=%s seqno=%s continue=%s size=%s mode=%s',
+                        workerid, cdrid, worker['generation'], direction, sample['seqno'], sample['continue'], len(payload), mode)
             if sample['continue'] == 0:
                 side['finished'] = True
-                self.executor.submit(self._run, workerid, worker['generation'], cdrid, direction, list(side['parts']), mode)
+                queued_at = time.monotonic()
+                self.executor.submit(self._run, workerid, worker['generation'], cdrid, direction, list(side['parts']), mode, queued_at)
+                logger.info('TSB queued workerid=%s cdrid=%s generation=%s dir=%s fragments=%s size=%s',
+                            workerid, cdrid, worker['generation'], direction, len(side['parts']), side['bytes'])
             block = len(worker['sides']) == 2 and all(s['finished'] for s in worker['sides'].values()) and worker['bytes'] > self.capacity / 2
             return block
 
-    def _run(self, workerid, generation, cdrid, direction, parts, mode):
+    def _run(self, workerid, generation, cdrid, direction, parts, mode, queued_at):
         try:
             with self.condition:
                 worker = self.workers[workerid]
                 if worker['generation'] != generation or not worker['applied'] or worker['error']:
+                    logger.info('TSB task_discarded workerid=%s cdrid=%s generation=%s dir=%s stage=queued', workerid, cdrid, generation, direction)
                     return
+                started = time.monotonic()
+                logger.info('TSB processing_started workerid=%s cdrid=%s generation=%s dir=%s queue_wait_ms=%.0f',
+                            workerid, cdrid, generation, direction, (started - queued_at) * 1000)
             result = self.backend(parts, mode)
         except Exception as exc:
             logger.exception('TSB inference failed: workerid=%s cdrid=%s dir=%s', workerid, cdrid, direction)
@@ -149,19 +161,24 @@ class TSBService:
         with self.condition:
             worker = self.workers[workerid]
             if worker['generation'] != generation or not worker['applied'] or worker['error']:
+                logger.info('TSB task_discarded workerid=%s cdrid=%s generation=%s dir=%s stage=completed', workerid, cdrid, generation, direction)
                 return
             try:
                 self.db.execute('INSERT OR REPLACE INTO results VALUES (?,?,?,?,?)', (workerid, cdrid, direction, json.dumps(result, ensure_ascii=False), time.time() + self.retention))
                 self.db.commit()
             except Exception:
-                logger.exception('Unable to save TSB result')
+                logger.exception('Unable to save TSB result: workerid=%s cdrid=%s generation=%s dir=%s', workerid, cdrid, generation, direction)
                 self.db.rollback()
                 worker['error'] = 'Unable to save result'
                 return
             side = worker['sides'][direction]
             side['done'] = True
+            logger.info('TSB result_saved workerid=%s cdrid=%s generation=%s dir=%s processing_ms=%.0f segments=%s speakers=%s',
+                        workerid, cdrid, generation, direction, (time.monotonic() - started) * 1000,
+                        len(result.get('segments', [])), result.get('speaker_count'))
             shutil.rmtree(side['directory'], ignore_errors=True)
             if len(worker['sides']) == 2 and all(s['done'] for s in worker['sides'].values()):
+                logger.info('TSB worker_released workerid=%s cdrid=%s generation=%s', workerid, cdrid, generation)
                 self.workers[workerid] = self._empty(generation + 1)
                 self.condition.notify_all()
 
@@ -180,6 +197,8 @@ class TSBService:
                     item = {'cdrid': cdrid}
                     item.update(('l' if direction == 0 else 'r', json.loads(result)) for direction, result in rows)
                     data.append(item)
+                logger.info('TSB result_queried workerid=%s cdrid=%s returned=%s',
+                            workerid, cdrid, ','.join('l' if direction == 0 else 'r' for direction, _ in rows) or 'none')
             if not data and (not worker['applied'] or worker['cdrid'] not in (None, *cdrids)):
                 raise TSBError('workerid is not applied')
             return {'code': 200, 'msg': 'Success', 'completed': bool(data), **({'data': data} if data else {})}

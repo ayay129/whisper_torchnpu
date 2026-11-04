@@ -112,7 +112,7 @@ def main():
     args = parser.parse_args()
     if args.workers < 1:
         parser.error('--workers must be positive')
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
     runtime = WhisperRuntime(args.models_dir, args.device_id, args.language)
     import uvicorn
     uvicorn.run(create_app(runtime, args.data_dir, args.workers), host=args.host, port=args.port, workers=1)

@@ -85,6 +85,22 @@ class TSBServiceTest(unittest.TestCase):
         self.service.restart(0)
         self.assertEqual(self.service.apply(), 0)
 
+    def test_trace_shows_missing_side_and_completed_session(self):
+        with self.assertLogs('tsb_core', level='INFO') as captured:
+            self.service.apply()
+            self.service.submit(0, sample(0), {'start': 0}, b'1234', 'combo')
+            self.wait_until(lambda: self.service.get(0, [123]).get('completed'))
+            self.service.submit(0, sample(1), {'start': 0}, b'1234', 'combo')
+            self.wait_until(lambda: not self.service.workers[0]['applied'])
+            self.service.get(0, [123])
+        output = '\n'.join(captured.output)
+        self.assertIn('fragment_received workerid=0 cdrid=123 generation=0 dir=0 seqno=0 continue=0 size=4', output)
+        self.assertIn('queued workerid=0 cdrid=123 generation=0 dir=1 fragments=1 size=4', output)
+        self.assertIn('processing_started workerid=0 cdrid=123 generation=0 dir=1', output)
+        self.assertIn('result_saved workerid=0 cdrid=123 generation=0 dir=1', output)
+        self.assertIn('result_queried workerid=0 cdrid=123 returned=l', output)
+        self.assertIn('worker_released workerid=0 cdrid=123', output)
+
     def test_priority_waiter_receives_released_worker(self):
         self.service.apply()
         allocated = []
