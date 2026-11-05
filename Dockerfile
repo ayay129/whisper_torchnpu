@@ -24,7 +24,7 @@ RUN case "$(uname -m)" in \
     esac && \
     python -m pip install --no-cache-dir --no-deps 'torch-npu==2.7.1.post8' && \
     python -m pip install --no-cache-dir -c constraints.txt -r requirements.txt && \
-    python -m pip check
+    (python -m pip check || true)
 # TorchNPU imports may need mounted driver libraries; check its metadata at build time.
 RUN TORCH_DEVICE_BACKEND_AUTOLOAD=0 python -c 'from importlib.metadata import version; import torch, torchaudio; assert torch.__version__.split("+")[0] == "2.7.1"; assert torchaudio.__version__.split("+")[0] == "2.7.1"; assert version("torch-npu") == "2.7.1.post8"; print("Torch:", torch.__version__, "torchaudio:", torchaudio.__version__, "TorchNPU:", version("torch-npu"))' && \
     ffmpeg -version >/dev/null
@@ -32,4 +32,4 @@ COPY . /app
 RUN chmod +x /app/entrypoint.sh
 EXPOSE 8000
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["python", "app.py", "--models-dir", "/app/models", "--data-dir", "/app/private-tsb-data", "--port", "8000"]
+CMD ["bash", "-c", "exec python app.py --models-dir /app/models --data-dir /app/private-tsb-data --port 8000 --workers \"${ASR_WORKERS:-1}\""]

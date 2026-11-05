@@ -31,7 +31,7 @@ Silero 的 `hubconf.py` 还会导入同仓库的 `src/silero_vad/` 代码，所�
 
 准备 ffmpeg，以及适配目标设备的 CANN、PyTorch、torchaudio 和 torch-npu。TorchNPU 通过 CANN 调用昇腾算子，依然需要 CANN。`constraints.txt` 固定当前 Docker 构建基线：PyTorch/torchaudio 2.7.1、torch-npu 2.7.1.post8，配套 CANN 9.1.0。其他 CANN 版本需要重新核对配套关系。不要把本项目与昇腾 950 项目的依赖版本直接混用。安装完对应的 torch/torchaudio/torch-npu 后：
 
-`--workers N` 会创建 N 个 TSB 会话名额和 N 个常驻推理进程，每个进程在指定 NPU 上独立加载一套模型。默认值为 6，启动和显存开销会随进程数增加；建议先用 `--workers 2` 在目标机器验证显存和吞吐。所有进程初始化完成后服务才开始监听端口。普通 `/transcribe` 请求使用 0 号推理进程，与 TSB worker 0 的任务排队执行，不额外加载模型。
+`--workers N` 会创建 N 个 TSB 会话名额和 N 个常驻推理进程，每个进程在指定 NPU 上独立加载一套模型。直接启动 `app.py` 的默认值为 6；Docker 默认值为 1，可通过环境变量 `ASR_WORKERS` 指定。启动和显存开销会随进程数增加，建议先用 2 个 worker 在目标机器验证显存和吞吐。所有进程初始化完成后服务才开始监听端口。普通 `/transcribe` 请求使用 0 号推理进程，与 TSB worker 0 的任务排队执行，不额外加载模型。
 
 ```bash
 python -m pip install -c constraints.txt -r requirements.txt \
@@ -97,6 +97,7 @@ mkdir -p private-tsb-data
 
 docker run -d --name whisperx-imonitor \
   --ipc=host \
+  -e ASR_WORKERS=6 \
   --device=/dev/davinci0 \
   --device=/dev/davinci_manager \
   --device=/dev/devmm_svm \
@@ -110,6 +111,8 @@ docker run -d --name whisperx-imonitor \
 
 docker logs -f whisperx-imonitor
 ```
+
+不指定 `ASR_WORKERS` 时容器启动 1 个 worker；修改环境变量后需要重新创建容器。该环境变量由镜像默认启动命令读取，如果覆盖了镜像的启动命令，请在自己的命令中传入 `--workers`。
 
 只挂载宿主机驱动，不用宿主机的整个 `/usr/local/Ascend` 覆盖容器目录，否则会把镜像内配套的 CANN 覆盖掉。其他昇腾型号需要使用对应芯片的镜像及设备配置。实际镜像构建、驱动与 NPU 推理需要在目标服务器验证。
 
