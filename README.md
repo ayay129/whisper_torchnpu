@@ -133,6 +133,8 @@ curl -X POST http://127.0.0.1:8000/transcribe \
 
 TSB 流程：先调用 `/tsb/sessionapply`，使用返回的 `workerid`；依次以 `dir=0` 和 `dir=1` 上传同一个 `cdrid` 的 PCM，每路最后一片 `continue=0`；随后使用 `workerid` 和形如 `[12345]` 的 `cdrid` 表单轮询 `/tsb/getresult`。`combo` 输出转录和声纹，`vponly` 仅输出声纹。单个 worker 只绑定一个 `cdrid`。`completed=true` 代表至少一路有结果，需分别检查 `l` 和 `r`。
 
+`combo` 不因有效语音不足 5 秒而拒绝转录：识别到声纹时正常返回；没有识别到说话人时，片段的 `speaker_id` 为 `null`，`speaker_count` 为 `0`，`speakers` 为空数组。短语音的声纹可靠性可能较低。
+
 可通过 `GET /tsb/status?workerid=2&cdrid=1793776767146000` 查询同一会话左右声道的状态。每路返回 `status` 和 `received_fragments`；`receiving` 时额外返回 `next_seqno`，表示下一片的序号，不代表剩余数量。状态包括 `not_received`、`receiving`、`queued`、`processing`、`completed`、`failed` 和 `unknown`；`failed` 会附带简短的 `error`。`processing` 表示处理线程已取出任务，可能仍在等待推理进程或模型锁。成功结果和新写入的分片数量保留 24 小时；旧结果的分片数量可能为 `null`。服务重启或 worker 重置后未完成的声道无法恢复，状态为 `unknown`，需要重传；查询状态不会重置会话。
 
 ```bash

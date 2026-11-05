@@ -4,4 +4,4 @@ __pycache__/
 models/*
 !models/.gitkeep
 private-tsb-data/
-*bad_cases*
+*bad_case*

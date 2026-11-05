@@ -177,7 +177,7 @@ class TSBBackend:
         joined = np.concatenate(waveforms)
         with self.runtime.lock:
             turns, vectors = self.runtime.speakers(joined, embeddings=True)
-            if (not vectors and mode == 'vponly') or (vectors and sum(end - start for start, end, _ in turns) < 5):
+            if mode == 'vponly' and (not vectors or sum(end - start for start, end, _ in turns) < 5):
                 raise ValueError('Effective audio duration is too short')
             speaker_ids = {name: i for i, name in enumerate(vectors)}
             speakers = [{'speaker_id': speaker_ids[name], 'vpstr': encode_vector(vector)} for name, vector in vectors.items()]

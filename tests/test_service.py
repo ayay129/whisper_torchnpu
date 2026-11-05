@@ -204,6 +204,36 @@ class ServiceTest(unittest.TestCase):
                     self.assertEqual(self.runtime.calls, before)
                 self.assertEqual(result, self.client.post('/tsb/getresult', data={'workerid': worker, 'cdrid': f'[{cdrid}]'}).json())
 
+    def test_combo_returns_short_speech_and_missing_speaker_for_both_sides(self):
+        vector = np.array([1, 2], dtype='<f4')
+        with patch.object(self.runtime, 'speakers', side_effect=[
+                ([(0.0, 4.0, 'SPEAKER_00')], {'SPEAKER_00': vector}),
+                ([], {})]):
+            worker = self.client.get('/tsb/sessionapply').json()['workerid']
+            for direction in (0, 1):
+                response = self.client.post('/tsb/transcribe', data={
+                    'workerid': worker, 'sample': json.dumps(sample(direction, 46)),
+                    'label': '{"time":"today","start":0}'},
+                    files={'sgmfile': ('test.pcm', b'\0\0' * (6 * SAMPLE_RATE))})
+                self.assertEqual(response.status_code, 200, response.text)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                response = self.client.post('/tsb/getresult', data={'workerid': worker, 'cdrid': '[46]'})
+                self.assertEqual(response.status_code, 200, response.text)
+                result = response.json()
+                if result.get('data') and 'r' in result['data'][0]:
+                    break
+                time.sleep(.01)
+            item = result['data'][0]
+            self.assertEqual(item['l']['segments'][0]['text'], 'hello')
+            self.assertEqual(item['l']['segments'][0]['speaker_id'], 0)
+            self.assertEqual(item['l']['speaker_count'], 1)
+            self.assertEqual(base64.b64decode(item['l']['speakers'][0]['vpstr']), vector.tobytes())
+            self.assertEqual(item['r']['segments'][0]['text'], 'hello')
+            self.assertIsNone(item['r']['segments'][0]['speaker_id'])
+            self.assertEqual(item['r']['speaker_count'], 0)
+            self.assertEqual(item['r']['speakers'], [])
+
     def test_tsb_preserves_fragment_offsets(self):
         worker = self.client.get('/tsb/sessionapply').json()['workerid']
         pcm = b'\0\0' * (6 * SAMPLE_RATE)
