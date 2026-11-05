@@ -1,4 +1,4 @@
-# whisperx_imonitor
+# whisperx_ascend
 
 独立的 WhisperX 风格昇腾服务：Silero VAD + Transformers Whisper large-v3 (TorchNPU) + pyannote/WeSpeaker + TSB。无需 MindIE、无需编译 `.ts`。服务只读取本地模型，缺少文件时启动报错，不会自动下载。
 
@@ -75,7 +75,7 @@ npu-smi info -t board -i 0
 查看 `Software Version`、`Firmware Version` 和 `Compatibility`；`Compatibility` 应为 `OK`，其他卡也应逐卡核对。命令与字段说明见 [官方版本查询指引](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/instg/instg_0030.html)。容器自带新版 CANN，宿主机不必安装同版 toolkit；保持宿主机现有环境，通过下方驱动目录挂载使用。版本矩阵兼容仍需经过容器内的真实 NPU 推理验证。
 
 ```bash
-docker build -t whisperx-imonitor .
+docker build -t whisperx-ascend .
 ```
 
 同一个官方镜像也由 DockerHub 提供，可按服务器网络切换镜像地址，版本保持一致：
@@ -83,7 +83,7 @@ docker build -t whisperx-imonitor .
 ```bash
 docker build \
   --build-arg CANN_IMAGE=ascendai/cann:9.1.0-910b-ubuntu22.04-py3.10 \
-  -t whisperx-imonitor .
+  -t whisperx-ascend .
 ```
 
 通用依赖和 torch-npu 使用华为 PyPI 源。两种 CPU 架构的 torch 都使用 `2.7.1+cpu` wheel，Docker 构建通过阿里云 PyTorch wheel 镜像 `https://mirrors.aliyun.com/pytorch-wheels/cpu/` 获取，避免安装 CUDA 版 PyTorch；torchaudio 的 x86_64 wheel 是 `2.7.1+cpu`，ARM64 wheel 是 `2.7.1`。CPU wheel 配合 torch-npu，Whisper 和声纹模型仍在 NPU 运行。不要仅替换基础镜像为其他 CANN 版本，而继续沿用这组固定的 PyTorch/TorchNPU 版本。
@@ -95,7 +95,7 @@ docker build \
 ```bash
 mkdir -p private-tsb-data
 
-docker run -d --name whisperx-imonitor \
+docker run -d --name whisperx-ascend \
   --ipc=host \
   -e ASR_WORKERS=6 \
   --device=/dev/davinci0 \
@@ -107,9 +107,9 @@ docker run -d --name whisperx-imonitor \
   -v "$PWD/models:/app/models:ro" \
   -v "$PWD/private-tsb-data:/app/private-tsb-data" \
   -p 8000:8000 \
-  whisperx-imonitor
+  whisperx-ascend
 
-docker logs -f whisperx-imonitor
+docker logs -f whisperx-ascend
 ```
 
 不指定 `ASR_WORKERS` 时容器启动 1 个 worker；修改环境变量后需要重新创建容器。该环境变量由镜像默认启动命令读取，如果覆盖了镜像的启动命令，请在自己的命令中传入 `--workers`。
