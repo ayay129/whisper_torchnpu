@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -7,14 +8,18 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from functools import partial
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 from app import create_app
+import app
 import process_runtime
 
 
 class FakeRuntime:
+    def __init__(self, device_id):
+        self.device_id = device_id
+
     def transcribe(self, audio, language=None):
         return {'pid': os.getpid(), 'segments': [{'start': 0.0, 'end': 1.0, 'text': 'hello'}], 'language': language or 'en'}
 
@@ -24,8 +29,9 @@ class FakeRuntime:
 
 
 class BarrierBackend:
-    def __init__(self, directory):
+    def __init__(self, directory, device_id):
         self.directory = Path(directory)
+        self.device_id = device_id
 
     def __call__(self, parts, mode):
         (self.directory / str(os.getpid())).touch()
@@ -34,12 +40,12 @@ class BarrierBackend:
             if time.monotonic() >= deadline:
                 raise TimeoutError('inference processes did not run concurrently')
             time.sleep(.01)
-        return {'pid': os.getpid(), 'mode': mode, 'segments': []}
+        return {'pid': os.getpid(), 'device_id': self.device_id, 'mode': mode, 'segments': []}
 
 
 def fake_initialize(model_dir, device_id, language):
-    process_runtime._runtime = FakeRuntime()
-    process_runtime._backend = BarrierBackend(model_dir)
+    process_runtime._runtime = FakeRuntime(device_id)
+    process_runtime._backend = BarrierBackend(model_dir, device_id)
 
 
 def fake_initialize_failure(model_dir, device_id, language):
@@ -51,10 +57,30 @@ def fake_initialize_failure(model_dir, device_id, language):
 
 
 class ProcessRuntimeTest(unittest.TestCase):
+    def test_main_uses_per_device_counts_for_workers_and_backends(self):
+        runtime = MagicMock()
+        with patch.dict(os.environ, {'ASR_WORKER_DEVICES': '0:2,1:1'}), \
+             patch.object(sys, 'argv', ['app.py', '--workers', '9']), \
+             patch('app.ProcessRuntimes', return_value=runtime) as factory, \
+             patch('app.create_app', return_value='application') as create, \
+             patch('uvicorn.run') as run:
+            app.main()
+        self.assertEqual(factory.call_args.args[1], [0, 0, 1])
+        self.assertEqual(create.call_args.args[2], 3)
+        self.assertEqual(len(create.call_args.args[3]), 3)
+        run.assert_called_once()
+        runtime.close.assert_called_once()
+
+    def test_parse_per_device_worker_counts(self):
+        self.assertEqual(process_runtime.parse_worker_devices('0:2,1:3'), [0, 0, 1, 1, 1])
+        for invalid in ('', '0:0', '0:1,0:2', '-1:2', '0:1,', '0:abc', '0:1, 1:2'):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                process_runtime.parse_worker_devices(invalid)
+
     def test_spawned_processes_are_resident_bound_and_run_concurrently(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(process_runtime, '_initialize_worker', fake_initialize):
-                runtimes = process_runtime.ProcessRuntimes(directory, 0, None, 2)
+                runtimes = process_runtime.ProcessRuntimes(directory, [0, 1], None)
             try:
                 self.assertEqual(len(set(runtimes.pids)), 2)
                 self.assertNotIn(os.getpid(), runtimes.pids)
@@ -64,6 +90,7 @@ class ProcessRuntimeTest(unittest.TestCase):
                     futures = [threads.submit(runtimes.tsb, i, [], 'combo') for i in range(2)]
                     results = [future.result(timeout=10) for future in futures]
                 self.assertEqual([item['pid'] for item in results], runtimes.pids)
+                self.assertEqual([item['device_id'] for item in results], [0, 1])
             finally:
                 runtimes.close()
 
@@ -71,7 +98,7 @@ class ProcessRuntimeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(process_runtime, '_initialize_worker', fake_initialize_failure):
                 with self.assertRaises(BrokenProcessPool):
-                    process_runtime.ProcessRuntimes(directory, 0, None, 2)
+                    process_runtime.ProcessRuntimes(directory, [0, 0], None)
             pid = int((Path(directory) / 'initialized').read_text())
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
@@ -81,7 +108,7 @@ class ProcessRuntimeTest(unittest.TestCase):
             markers = Path(directory) / 'markers'
             markers.mkdir()
             with patch.object(process_runtime, '_initialize_worker', fake_initialize):
-                runtimes = process_runtime.ProcessRuntimes(str(markers), 0, None, 2)
+                runtimes = process_runtime.ProcessRuntimes(str(markers), [0, 0], None)
             try:
                 backends = [partial(runtimes.tsb, i) for i in range(2)]
                 with TestClient(create_app(runtimes, Path(directory) / 'data', workers=2, worker_backends=backends)) as client:

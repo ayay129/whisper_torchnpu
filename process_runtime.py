@@ -2,12 +2,27 @@
 import logging
 import multiprocessing
 import os
+import re
 import threading
 from concurrent.futures import ProcessPoolExecutor
 
 logger = logging.getLogger(__name__)
 _runtime = None
 _backend = None
+
+
+def parse_worker_devices(value):
+    devices = []
+    seen = set()
+    for item in value.split(','):
+        if not re.fullmatch(r'\d+:\d+', item):
+            raise ValueError('worker devices must use DEVICE:COUNT pairs, e.g. 0:10,1:8')
+        device, count = map(int, item.split(':'))
+        if device in seen or count < 1:
+            raise ValueError('worker device IDs must be unique and counts must be positive')
+        seen.add(device)
+        devices.extend([device] * count)
+    return devices
 
 
 def _initialize_worker(model_dir, device_id, language):
@@ -35,13 +50,13 @@ def _tsb(parts, mode):
 
 
 class ProcessRuntimes:
-    def __init__(self, model_dir, device_id, language, workers):
+    def __init__(self, model_dir, device_ids, language):
         self.lock = threading.RLock()
         self.executors = []
         self.pids = []
         context = multiprocessing.get_context('spawn')
         try:
-            for workerid in range(workers):
+            for workerid, device_id in enumerate(device_ids):
                 executor = ProcessPoolExecutor(max_workers=1, mp_context=context, initializer=_initialize_worker,
                                                initargs=(model_dir, device_id, language))
                 self.executors.append(executor)

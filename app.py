@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
 import tempfile
 from functools import partial
@@ -14,7 +15,7 @@ from fastapi import File, Form, HTTPException, UploadFile
 
 from audio import decode_media, decode_pcm
 from runtime import encode_vector, speaker_for_segment
-from process_runtime import ProcessRuntimes
+from process_runtime import ProcessRuntimes, parse_worker_devices
 from tsb_api import TSBBackend, create_app as create_tsb_app, parse_input
 from tsb_core import TSBError, TSBService
 
@@ -109,17 +110,24 @@ def main():
     parser.add_argument('--device-id', type=int, default=0)
     parser.add_argument('--language', default=None, help='Optional Whisper language code')
     parser.add_argument('--workers', type=int, default=6, help='TSB worker and inference process count')
+    parser.add_argument('--worker-devices', default=os.environ.get('ASR_WORKER_DEVICES'),
+                        help='Per-device worker counts, e.g. 0:10,1:8 (overrides --workers and --device-id)')
     parser.add_argument('--host', default='0.0.0.0')
     parser.add_argument('--port', type=int, default=8000)
     args = parser.parse_args()
     if args.workers < 1:
         parser.error('--workers must be positive')
+    try:
+        device_ids = (parse_worker_devices(args.worker_devices) if args.worker_devices is not None
+                      else [args.device_id] * args.workers)
+    except ValueError as exc:
+        parser.error(str(exc))
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
-    runtime = ProcessRuntimes(args.models_dir, args.device_id, args.language, args.workers)
+    runtime = ProcessRuntimes(args.models_dir, device_ids, args.language)
     try:
         import uvicorn
-        backends = [partial(runtime.tsb, workerid) for workerid in range(args.workers)]
-        uvicorn.run(create_app(runtime, args.data_dir, args.workers, backends), host=args.host, port=args.port, workers=1)
+        backends = [partial(runtime.tsb, workerid) for workerid in range(len(device_ids))]
+        uvicorn.run(create_app(runtime, args.data_dir, len(device_ids), backends), host=args.host, port=args.port, workers=1)
     finally:
         runtime.close()
 

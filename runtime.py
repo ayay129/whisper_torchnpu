@@ -67,6 +67,8 @@ class WhisperRuntime:
 
         if not torch.npu.is_available():
             raise RuntimeError('TorchNPU is installed but no Ascend NPU is available')
+        if not 0 <= device_id < torch.npu.device_count():
+            raise RuntimeError(f'NPU device {device_id} is not visible; visible device count: {torch.npu.device_count()}')
         self.torch = torch
         self.device = torch.device(f'npu:{device_id}')
         torch.npu.set_device(self.device)

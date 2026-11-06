@@ -33,6 +33,17 @@ Silero 的 `hubconf.py` 还会导入同仓库的 `src/silero_vad/` 代码，所�
 
 `--workers N` 会创建 N 个 TSB 会话名额和 N 个常驻推理进程，每个进程在指定 NPU 上独立加载一套模型。直接启动 `app.py` 的默认值为 6；Docker 默认值为 1，可通过环境变量 `ASR_WORKERS` 指定。启动和显存开销会随进程数增加，建议先用 2 个 worker 在目标机器验证显存和吞吐。所有进程初始化完成后服务才开始监听端口。普通 `/transcribe` 请求使用 0 号推理进程，与 TSB worker 0 的任务排队执行，不额外加载模型。
 
+多卡时，可用 `ASR_WORKER_DEVICES` 分别指定容器内逻辑设备编号及 worker 数量。例如，在目标环境确认 `ASCEND_RT_VISIBLE_DEVICES=6,7` 对应进程内 `npu:0` 和 `npu:1` 后：
+
+```bash
+docker run -d \
+  -e ASCEND_RT_VISIBLE_DEVICES=6,7 \
+  -e ASR_WORKER_DEVICES=0:10,1:8 \
+  ...
+```
+
+示例中的 `...` 应替换为实际容器名、端口、设备和驱动挂载参数及镜像名，不可直接执行。该配置在逻辑设备 0 启动 10 个 worker，在逻辑设备 1 启动 8 个，共 18 个；worker 按配置顺序固定绑定。`ASR_WORKER_DEVICES` 生效时覆盖 `ASR_WORKERS`、`--workers` 和 `--device-id` 的 worker/设备分配；不设置它时保持单卡原有行为。源码启动也可使用 `--worker-devices 0:10,1:8`，其优先于同名环境变量。每个编号必须唯一，数量为正整数，不可见的逻辑设备会导致启动失败。可见卡的编号与宿主机 NPU 编号可能不同，以实际映射为准；通过启动日志和 `npu-smi info` 核实。
+
 ```bash
 python -m pip install -c constraints.txt -r requirements.txt \
   -i https://mirrors.huaweicloud.com/repository/pypi/simple
